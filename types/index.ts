@@ -58,7 +58,8 @@ export type AnalyticsEvent =
   | "roadmap_viewed"
   | "product_demo_tab_changed"
   | "university_selector_changed"
-  | "build_in_public_cta_clicked";
+  | "build_in_public_cta_clicked"
+  | "final_cta_clicked";
 
 export interface AnalyticsProperties {
   [key: string]: string | number | boolean | undefined;

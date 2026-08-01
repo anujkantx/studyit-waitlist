@@ -1,7 +1,7 @@
 "use server";
 
 import { waitlistSchema, type WaitlistSchema } from "@/lib/validation";
-import { createSupabaseAdmin } from "@/lib/supabase/server";
+import { Pool } from "pg";
 
 export type WaitlistResult =
   | { success: true; status: "created"; referralCode: string }
@@ -16,6 +16,12 @@ function generateReferralCode(): string {
   }
   return result;
 }
+
+// Create a single pool instance
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 export async function joinWaitlist(data: WaitlistSchema): Promise<WaitlistResult> {
   try {
@@ -32,59 +38,48 @@ export async function joinWaitlist(data: WaitlistSchema): Promise<WaitlistResult
     const normalizedName = name?.trim();
     const normalizedUniversity = university.trim();
 
-    const supabase = createSupabaseAdmin();
-
-    // 3. Check for existing email to avoid throwing nasty constraints to the user
-    const { data: existingUser, error: checkError } = await supabase
-      .from("waitlist")
-      .select("id")
-      .eq("email", normalizedEmail)
-      .maybeSingle();
-
-    if (checkError) {
-      console.error("[Waitlist] Error checking existing user:", checkError);
-      return { success: false, status: "server_error", message: "Could not process request." };
-    }
-
-    if (existingUser) {
-      return { success: true, status: "already_registered" };
-    }
-
-    // 4. Generate referral code
-    // A robust system would loop to ensure uniqueness, but for 6 chars (1B permutations) 
-    // in a pre-launch waitlist, simple generation is sufficient.
+    // 3. Generate referral code
     const referralCode = generateReferralCode();
 
-    // 5. Insert
-    const { error: insertError } = await supabase.from("waitlist").insert({
-      email: normalizedEmail,
-      name: normalizedName || null,
-      university: normalizedUniversity,
-      program: program?.trim() || null,
-      semester: semester?.trim() || null,
-      wants_to_contribute: wantsToContribute,
-      campus_ambassador_interest: campusAmbassadorInterest,
-      source: attribution.source || null,
-      utm_source: attribution.utm_source || null,
-      utm_medium: attribution.utm_medium || null,
-      utm_campaign: attribution.utm_campaign || null,
-      utm_content: attribution.utm_content || null,
-      utm_term: attribution.utm_term || null,
-      referred_by: attribution.referred_by || null,
-      referral_code: referralCode,
-    });
+    // 4. Insert or check existing
+    const query = `
+      INSERT INTO public.waitlist (
+        email, name, university, program, semester, wants_to_contribute, campus_ambassador_interest,
+        source, utm_source, utm_medium, utm_campaign, utm_content, utm_term, referred_by, referral_code
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+      ) RETURNING id;
+    `;
 
-    if (insertError) {
-      // Catch race condition where email was inserted between check and insert
-      if (insertError.code === "23505" && insertError.message.includes("waitlist_email_key")) {
+    const values = [
+      normalizedEmail,
+      normalizedName || null,
+      normalizedUniversity,
+      program?.trim() || null,
+      semester?.trim() || null,
+      wantsToContribute,
+      campusAmbassadorInterest,
+      attribution.source || null,
+      attribution.utm_source || null,
+      attribution.utm_medium || null,
+      attribution.utm_campaign || null,
+      attribution.utm_content || null,
+      attribution.utm_term || null,
+      attribution.referred_by || null,
+      referralCode
+    ];
+
+    try {
+      await pool.query(query, values);
+      return { success: true, status: "created", referralCode };
+    } catch (dbError: any) {
+      // 23505 is the PostgreSQL error code for unique violation
+      if (dbError.code === "23505" && dbError.constraint === "waitlist_email_key") {
         return { success: true, status: "already_registered" };
       }
-      
-      console.error("[Waitlist] Error inserting user:", insertError);
+      console.error("[Waitlist] Database error:", dbError);
       return { success: false, status: "server_error", message: "Could not join waitlist. Please try again." };
     }
-
-    return { success: true, status: "created", referralCode };
   } catch (error) {
     console.error("[Waitlist] Unexpected server error:", error);
     return { success: false, status: "server_error", message: "An unexpected error occurred." };
